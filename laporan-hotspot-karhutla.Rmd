@@ -1,0 +1,407 @@
+---
+title: "Analisis Data Kategorik Karakteristik Deteksi Hotspot Karhutla di Indonesia (11-12 November 2026)"
+author: "Wa Ode Nisrina Sayyidah Hidayat"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(car)       # Anova
+library(sandwich)  # vcovCL: galat baku cluster-robust
+library(lmtest)    # coeftest, coefci
+library(pROC)      # AUC
+library(nnet)      # multinom
+library(gridExtra) # grid.arrange
+set.seed(123)
+```
+
+# Pendahuluan
+
+## Latar Belakang
+
+Kebakaran hutan dan lahan (karhutla) di Indonesia dipantau salah satunya melalui titik panas (*hotspot*) yang dideteksi satelit penginderaan jauh. Hotspot menunjukkan lokasi yang suhunya terbaca tinggi oleh sensor satelit, tetapi **tidak otomatis berarti kebakaran**: titik tersebut dapat berupa api, dapat pula sumber panas lain. Karena itu, setiap hotspot disertai tingkat kepercayaan (*confidence*) yang menunjukkan seberapa yakin sistem bahwa titik tersebut merupakan api.
+
+Aturan penentuan *confidence* berbeda pada tiap satelit dan sensor, sehingga memahami faktor-faktor yang berkaitan dengan tingkat kepercayaan penting bagi pengguna data, misalnya untuk menentukan prioritas verifikasi lapangan. Laporan ini menganalisis data hotspot pada 11-12 November 2026 menggunakan metode analisis data kategorik.
+
+## Rumusan Masalah
+
+1. Apakah tingkat kepercayaan hotspot (*confidence*) berhubungan dengan satelit pendeteksi, sesi waktu deteksi (siang/malam), dan wilayah pulau?
+2. Bagaimana pengaruh satelit, sesi waktu, dan wilayah terhadap peluang suatu hotspot berkategori *confidence* rendah, setelah ketiganya dikontrol bersama dan ketergantungan antartitik diperhitungkan?
+3. Bagaimana perbedaan peluang kategori *Low* dan *High* dibandingkan *Medium* menurut karakteristik deteksi tersebut, dan seberapa stabil temuan ini terhadap wilayah dengan jumlah titik yang sangat dominan?
+
+## Tujuan
+
+1. Menguji dan mengukur kekuatan asosiasi antara *confidence* dan satelit, sesi waktu, serta pulau.
+2. Memodelkan peluang hotspot berkepercayaan rendah dengan regresi logistik biner.
+3. Memodelkan tiga kategori *confidence* sekaligus dengan regresi logistik multinomial.
+4. Menguji ketahanan temuan terhadap ketergantungan antartitik dan terhadap satu kabupaten yang mendominasi data.
+
+## Manfaat
+
+Hasil analisis membantu pengguna data hotspot memahami bahwa kualitas keyakinan deteksi bergantung pada karakteristik pengamatan (satelit dan waktu), sehingga dapat dijadikan pertimbangan dalam menafsirkan dan memprioritaskan titik panas untuk verifikasi.
+
+# Tinjauan Pustaka
+
+**Hotspot dan *confidence*.** Hotspot adalah piksel citra satelit yang terdeteksi memiliki anomali termal. Tingkat kepercayaan dihitung oleh algoritma masing-masing sensor dan dikelompokkan menjadi kategori seperti *Low*, *Medium*, dan *High*. Karena algoritmanya berbeda antarsensor, perbedaan *confidence* antarsatelit tidak otomatis berarti perbedaan kualitas kejadian di lapangan. *(Tambahkan rujukan dokumentasi NASA FIRMS untuk definisi dan ambang tiap kategori.)*
+
+**Uji chi-square independensi.** Menguji apakah dua variabel kategorik saling bebas dengan membandingkan frekuensi teramati dan harapan; kekuatan hubungannya diukur dengan Cramér's V dan sel-sel penyebab ketidakbebasan diidentifikasi lewat residual terstandarisasi (Agresti, 2013).
+
+**Regresi logistik biner dan multinomial.** Regresi logistik biner memodelkan log-odds suatu kejadian dan dibaca melalui *odds ratio* (OR = e^β). Regresi logistik multinomial memperluasnya untuk respons nominal dengan lebih dari dua kategori, dengan satu kategori sebagai acuan (Hosmer, Lemeshow, & Sturdivant, 2013).
+
+**Galat baku *cluster-robust*.** Bila pengamatan dalam satu kelompok saling berkaitan (di sini, titik-titik pada kabupaten/kota yang sama), galat baku biasa cenderung terlalu kecil sehingga p-value terlalu optimistis. Galat baku *cluster-robust* mengoreksi hal ini (Cameron & Miller, 2015; Zeileis, Köll, & Graham, 2020).
+
+# Metodologi
+
+## Data
+
+Data berupa sheet *Detail* pada file `sebaran-hotspot.xlsx`, yaitu 3.350 titik hotspot pada **11-12 November 2026** di 33 provinsi dan 184 kabupaten/kota. Satu baris mewakili satu titik hotspot.
+
+## Variabel Penelitian
+
+| Variabel | Peran | Kategori | Asal kolom | Acuan |
+|---|---|---|---|---|
+| *Confidence* | Respons | *Low*, *Medium*, *High* (biner: *Low* = 1, lainnya = 0) | `Confidence` | *Medium* (multinomial) |
+| Satelit | Prediktor | NASA-NOAA21, NASA-NOAA20, NASA-MODIS | `Satelit` | NASA-NOAA21 |
+| Sesi | Prediktor | Siang (06.00-17.59 WIB), Malam (di luar itu) | turunan dari `Waktu` | Malam |
+| Pulau | Prediktor (biner) | Sumatera, Jawa, Bali-Nusa Tenggara, Kalimantan, Sulawesi, Maluku-Papua | turunan dari `Provinsi` | Kalimantan |
+| Wilayah | Prediktor (multinomial) | Maluku-Papua, Lainnya | turunan dari `Pulau` | Lainnya |
+
+Pada model multinomial, pulau diringkas menjadi dua kelompok karena Kalimantan dan Jawa tidak memiliki satu pun hotspot *High* sehingga model dengan enam kategori pulau mengalami separasi sempurna.
+
+## Tahapan Analisis
+
+1. Persiapan data dan pembentukan variabel turunan.
+2. Statistik deskriptif.
+3. Uji chi-square independensi (satelit, sesi, pulau terhadap *confidence*) dengan Cramér's V dan residual terstandarisasi.
+4. Regresi logistik biner (*Low* vs bukan *Low*), disertai galat baku *cluster-robust* per kabupaten/kota.
+5. Regresi logistik multinomial (*Low*, *Medium*, *High*) dengan selang kepercayaan bootstrap per klaster.
+6. Analisis sensitivitas dengan mengeluarkan kabupaten yang paling dominan.
+
+Hipotesis uji chi-square: H0 = *confidence* dan variabel pasangannya saling bebas; H1 = keduanya berhubungan. Taraf signifikansi α = 5%.
+
+# Hasil dan Pembahasan
+
+## Persiapan Data
+
+```{r baca-data}
+path <- "D:/1. KULIAH/Semester 3/[ANDAKAT]/PROJECT"  
+hot <- read_excel(file.path(path, "sebaran-hotspot.xlsx"), sheet = "Detail")
+
+pulau <- list(
+  "Sumatera"           = c("Aceh","Sumatera Utara","Sumatera Barat","Riau","Kepulauan Riau","Jambi",
+                           "Sumatera Selatan","Bangka Belitung","Bengkulu","Lampung"),
+  "Jawa"               = c("Banten","DKI Jakarta","Jawa Barat","Jawa Tengah","Yogyakarta","Jawa Timur"),
+  "Bali-Nusa Tenggara" = c("Bali","Nusa Tenggara Barat","Nusa Tenggara Timur"),
+  "Kalimantan"         = c("Kalimantan Barat","Kalimantan Tengah","Kalimantan Selatan",
+                           "Kalimantan Timur","Kalimantan Utara","IKN"),
+  "Sulawesi"           = c("Sulawesi Utara","Gorontalo","Sulawesi Tengah","Sulawesi Barat",
+                           "Sulawesi Selatan","Sulawesi Tenggara"),
+  "Maluku-Papua"       = c("Maluku","Maluku Utara","Papua","Papua Barat","Papua Barat Daya",
+                           "Papua Selatan","Papua Tengah","Papua Pegunungan")
+)
+peta_pulau <- stack(pulau) %>% rename(Provinsi = values, Pulau = ind) %>%
+  mutate(Provinsi = as.character(Provinsi), Pulau = as.character(Pulau))
+
+hot <- hot %>%
+  mutate(Provinsi = dplyr::recode(Provinsi, "Kepulauan Bangka Belitung" = "Bangka Belitung"),
+         KabKota  = `Kab Kota`,
+         klaster  = paste(Provinsi, KabKota, sep = "|"),
+         jam      = as.integer(substr(Waktu, 1, 2)),
+         Sesi     = ifelse(jam >= 6 & jam < 18, "Siang", "Malam")) %>%
+  left_join(peta_pulau, by = "Provinsi")
+
+stopifnot(nrow(hot) == 3350, !any(is.na(hot$Pulau)), !anyNA(hot$Confidence))
+
+hot <- hot %>%
+  mutate(
+    Confidence  = factor(Confidence, levels = c("Low", "Medium", "High")),
+    conf_rendah = as.integer(Confidence == "Low"),
+    Satelit     = relevel(factor(Satelit), ref = "NASA-NOAA21"),
+    Sesi        = relevel(factor(Sesi),    ref = "Malam"),
+    Pulau       = relevel(factor(Pulau),   ref = "Kalimantan"),
+    Wilayah     = relevel(factor(ifelse(Pulau == "Maluku-Papua", "Maluku-Papua", "Lainnya")), ref = "Lainnya")
+  )
+
+c(titik = nrow(hot), provinsi = n_distinct(hot$Provinsi), kabkota = n_distinct(hot$klaster))
+```
+
+## Statistik Deskriptif
+
+```{r deskriptif}
+tab_frek <- function(x, nama) {
+  t <- table(x)
+  data.frame(Variabel = nama, Kategori = names(t), Frekuensi = as.integer(t),
+             Persen = round(100 * as.numeric(prop.table(t)), 1))
+}
+deskriptif <- rbind(tab_frek(hot$Confidence, "Confidence"), tab_frek(hot$Satelit, "Satelit"),
+                    tab_frek(hot$Sesi, "Sesi"),             tab_frek(hot$Pulau, "Pulau"))
+kable(deskriptif, caption = "Distribusi variabel penelitian (n = 3.350)")
+
+hot %>% count(KabKota, Provinsi, sort = TRUE) %>% head(5)
+```
+
+```{r grafik, fig.width=9, fig.height=4}
+g1 <- ggplot(hot, aes(Satelit, fill = Confidence)) + geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + labs(y = "Proporsi", title = "Menurut satelit") + theme_minimal()
+g2 <- ggplot(hot, aes(Sesi, fill = Confidence)) + geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + labs(y = "Proporsi", title = "Menurut sesi waktu") + theme_minimal()
+gridExtra::grid.arrange(g1, g2, ncol = 2)
+```
+
+**Interpretasi.** Sebagian besar hotspot berkategori *Medium* (2.992 titik; 89,3%), sedangkan *Low* berjumlah 268 titik (8,0%) dan *High* hanya 90 titik (2,7%). Menurut satelit, NASA-NOAA21 (47,3%) dan NASA-NOAA20 (46,1%) mendominasi, sedangkan NASA-MODIS hanya 6,5%. Deteksi siang hari lebih banyak (56,0%) dibanding malam (44,0%). Menurut pulau, Maluku-Papua menyumbang 42,9% titik, disusul Sulawesi (24,7%), Kalimantan (18,3%), Sumatera (7,6%), Bali-Nusa Tenggara (4,7%), dan Jawa (1,8%).
+
+Satu temuan penting yang memengaruhi pembacaan seluruh hasil: **Kabupaten Merauke (Papua Selatan) sendirian menyumbang 1.030 titik atau sekitar 30,7% dari seluruh data**. Hal ini diperiksa lebih lanjut pada analisis sensitivitas (bagian 4.6).
+
+## Uji Chi-Square Independensi
+
+```{r fungsi-chi}
+cramer_v <- function(tbl) {
+  chi2 <- suppressWarnings(chisq.test(tbl)$statistic)
+  sqrt(unname(chi2) / (sum(tbl) * (min(dim(tbl)) - 1)))
+}
+uji_chi <- function(tbl, simulasi = FALSE) {
+  ex <- suppressWarnings(chisq.test(tbl)$expected)
+  cat("Sel dengan frekuensi harapan < 5:", round(100 * mean(ex < 5), 1), "%\n")
+  ct <- if (simulasi) chisq.test(tbl, simulate.p.value = TRUE, B = 10000) else chisq.test(tbl)
+  print(ct)
+  cat("Cramer's V =", round(cramer_v(tbl), 3), "\n")
+  invisible(ct)
+}
+```
+
+### Satelit dan *Confidence*
+
+```{r chi-satelit}
+t_sat <- table(hot$Satelit, hot$Confidence)
+t_sat; round(100 * prop.table(t_sat, 1), 1)
+uji_chi(t_sat)
+```
+
+### Sesi Waktu dan *Confidence*
+
+```{r chi-sesi}
+t_ses <- table(hot$Sesi, hot$Confidence)
+t_ses; round(100 * prop.table(t_ses, 1), 1)
+uji_chi(t_ses)
+```
+
+### Pulau dan *Confidence*
+
+```{r chi-pulau}
+t_pul <- table(hot$Pulau, hot$Confidence)
+t_pul; round(100 * prop.table(t_pul, 1), 1)
+ct_pul <- uji_chi(t_pul, simulasi = TRUE)   # sebagian sel harapan < 5 -> simulasi Monte Carlo
+round(ct_pul$stdres, 2)                     # residual terstandarisasi
+```
+
+**Interpretasi.** Ketiga pasangan variabel **berhubungan nyata** dengan *confidence* (semua p < 0,001):
+
+* **Satelit** (χ² ≈ 311,10; db = 4; Cramér's V ≈ 0,22, kekuatan sedang-lemah). NASA-NOAA21 paling "bersih" (95,0% *Medium*). NASA-NOAA20 memiliki proporsi *Low* tertinggi (13,5%) dengan *High* hampir tidak ada (0,8%), sedangkan NASA-MODIS paling banyak menghasilkan *High* (16,5%).
+* **Sesi waktu** (χ² ≈ 204,25; db = 2; V ≈ 0,25, kekuatan sedang-lemah). Deteksi malam hari hampir seluruhnya *Medium* (97,7%), sedangkan deteksi siang hari lebih beragam dengan 13,6% *Low* dan 3,6% *High*.
+* **Pulau** (χ² ≈ 171,06; db = 10; p dari simulasi; V ≈ 0,16, lemah). Sekitar 17% sel memiliki frekuensi harapan < 5 sehingga p-value disimulasikan. Residual terstandarisasi menunjukkan Maluku-Papua kelebihan hotspot *Low* (residual ≈ +7,9) dan *High* (≈ +3,7), sedangkan Sulawesi (≈ −6,1) dan Sumatera (≈ −4,0) kekurangan hotspot *Low*.
+
+Dengan n sebesar ini, hampir semua uji akan signifikan, sehingga **kekuatan hubungan (V)** lebih informatif daripada p-value. Uji chi-square juga mengasumsikan pengamatan independen, padahal titik pada kabupaten yang sama saling berkaitan; karena itu hasil chi-square dibaca sebagai gambaran asosiasi, dan inferensi utama bertumpu pada regresi dengan koreksi klaster. Temuan untuk pulau (terutama Maluku-Papua) perlu dibaca bersama analisis sensitivitas bagian 4.6.
+
+## Regresi Logistik Biner
+
+Respons: *Low* = 1, *Medium*/*High* = 0. Prediktor: satelit (acuan NOAA21), sesi (acuan Malam), pulau (acuan Kalimantan).
+
+```{r logit}
+m1 <- glm(conf_rendah ~ Satelit + Sesi + Pulau, data = hot, family = binomial)
+vc <- vcovCL(m1, cluster = hot$klaster)           # galat baku cluster-robust per kab/kota
+
+est <- coef(m1)
+ci_b <- confint.default(m1)                       # Wald biasa
+ci_r <- coefci(m1, vcov. = vc)                    # Wald cluster-robust
+p_r  <- coeftest(m1, vcov. = vc)[, 4]
+
+hasil_logit <- data.frame(
+  OR         = exp(est),
+  SK_bawah_r = exp(ci_r[, 1]),
+  SK_atas_r  = exp(ci_r[, 2]),
+  p_robust   = p_r,
+  SE_biasa   = sqrt(diag(vcov(m1))),
+  SE_robust  = sqrt(diag(vc))
+)
+round(hasil_logit, 4)
+```
+
+```{r logit-uji}
+# uji simultan (LR, tanpa koreksi klaster) dan kecocokan
+m0 <- update(m1, . ~ 1)
+lr <- 2 * (logLik(m1) - logLik(m0))
+data.frame(LR_chi2 = round(as.numeric(lr), 2), db = length(coef(m1)) - 1,
+           McFadden_R2 = round(1 - as.numeric(logLik(m1) / logLik(m0)), 3),
+           AUC = round(as.numeric(auc(roc(hot$conf_rendah, fitted(m1), quiet = TRUE))), 3))
+
+# uji Wald per variabel dengan matriks kovarians cluster-robust
+Anova(m1, vcov. = vc, type = "II", test.statistic = "Wald")
+
+vif(m1)
+```
+
+```{r logit-prediksi}
+skenario <- data.frame(
+  Satelit = factor(c("NASA-NOAA21", "NASA-NOAA20", "NASA-MODIS", "NASA-NOAA20"), levels = levels(hot$Satelit)),
+  Sesi    = factor(c("Malam", "Siang", "Siang", "Malam"), levels = levels(hot$Sesi)),
+  Pulau   = factor(c("Kalimantan", "Maluku-Papua", "Maluku-Papua", "Sumatera"), levels = levels(hot$Pulau))
+)
+skenario$peluang <- round(predict(m1, skenario, type = "response"), 4)
+skenario
+```
+
+**Interpretasi.** Model secara keseluruhan baik: uji rasio likelihood χ² ≈ 526,67 (db = 8; p < 0,001), McFadden R² ≈ 0,28, dan AUC ≈ 0,87. Uji Wald per variabel dengan koreksi klaster menunjukkan ketiga prediktor tetap berpengaruh signifikan (satelit χ² ≈ 21,40; sesi χ² ≈ 19,17; pulau χ² ≈ 44,31; semuanya p < 0,001). Perlu dicatat bahwa galat baku *cluster-robust* sekitar 1,5 hingga 3 kali lebih besar daripada galat baku biasa (kolom SE_biasa dan SE_robust), sehingga selang kepercayaan jauh lebih lebar dibanding analisis tanpa koreksi. Nilai VIF mendekati 1 (tidak ada multikolinearitas berarti).
+
+Rasio odds (SK 95% *cluster-robust*), dengan variabel lain dikontrol:
+
+* **Sesi.** Deteksi siang hari: OR ≈ **19,6** (5,2-74,4) dibanding malam. Efek terbesar dalam model.
+* **Satelit.** NASA-MODIS: OR ≈ **8,2** (3,2-20,8); NASA-NOAA20: OR ≈ **6,4** (2,1-19,7), keduanya dibanding NOAA21.
+* **Pulau (acuan Kalimantan).** Maluku-Papua: OR ≈ **3,3** (1,4-7,5); Sulawesi: OR ≈ 0,38 (0,16-0,88); Sumatera: OR ≈ 0,055 (0,006-0,47). Bali-Nusa Tenggara (OR ≈ 1,18) dan Jawa (OR ≈ 0,89) tidak berbeda nyata dari Kalimantan.
+
+Sebagai gambaran peluang: hotspot NOAA21 pada malam hari di Kalimantan hanya berpeluang sekitar 0,13% berkategori *Low*, sedangkan NOAA20 pada siang hari di Maluku-Papua sekitar 35% dan NASA-MODIS pada siang hari di Maluku-Papua sekitar 41%. Jawa dan Sumatera masing-masing hanya memiliki 1 hotspot *Low*, sehingga estimasi keduanya kurang stabil (selang kepercayaan sangat lebar).
+
+## Regresi Logistik Multinomial
+
+Respons: *Confidence* tiga kategori dengan acuan *Medium*. Prediktor: satelit, sesi, dan wilayah (Maluku-Papua vs Lainnya).
+
+```{r multinom}
+hot$Confidence_m <- relevel(hot$Confidence, ref = "Medium")
+m3 <- multinom(Confidence_m ~ Satelit + Sesi + Wilayah, data = hot, trace = FALSE)
+
+# kecocokan dan uji simultan (tanpa koreksi klaster)
+m3_0 <- multinom(Confidence_m ~ 1, data = hot, trace = FALSE)
+lr3 <- 2 * (logLik(m3) - logLik(m3_0))
+data.frame(LR_chi2 = round(as.numeric(lr3), 2), db = length(coef(m3)),
+           McFadden_R2 = round(1 - as.numeric(logLik(m3) / logLik(m3_0)), 3))
+
+# OR dengan galat baku biasa
+s3 <- summary(m3)
+or_biasa <- exp(s3$coefficients)
+round(or_biasa, 3)
+```
+
+```{r multinom-boot}
+# bootstrap per klaster (kab/kota) untuk selang kepercayaan yang memperhitungkan ketergantungan antartitik
+B <- 300
+idx_klaster <- split(seq_len(nrow(hot)), hot$klaster)
+nama_klaster <- names(idx_klaster)
+
+satu_boot <- function() {
+  pilih <- sample(nama_klaster, length(nama_klaster), replace = TRUE)
+  d <- hot[unlist(idx_klaster[pilih]), ]
+  tryCatch({
+    m <- multinom(Confidence_m ~ Satelit + Sesi + Wilayah, data = d, trace = FALSE)
+    as.vector(t(coef(m)))
+  }, error = function(e) rep(NA_real_, length(coef(m3))))
+}
+hasil_boot <- t(replicate(B, satu_boot()))
+
+nama_par <- as.vector(t(outer(rownames(coef(m3)), colnames(coef(m3)), paste, sep = ": ")))
+colnames(hasil_boot) <- nama_par
+ci_boot <- t(apply(hasil_boot, 2, quantile, probs = c(0.025, 0.975), na.rm = TRUE))
+tabel_boot <- data.frame(OR = exp(as.vector(t(coef(m3)))),
+                         SK_bawah = exp(ci_boot[, 1]), SK_atas = exp(ci_boot[, 2]))
+rownames(tabel_boot) <- nama_par
+round(tabel_boot[!grepl("Intercept", rownames(tabel_boot)), ], 3)
+```
+
+**Interpretasi.** Model multinomial signifikan secara simultan (uji rasio likelihood χ² ≈ 670,48; db = 8; p < 0,001; McFadden R² ≈ 0,25). Dengan koreksi klaster (angka berikut dari galat baku *cluster-robust*; hasil bootstrap pada chunk di atas akan serupa tetapi tidak identik):
+
+**Low dibandingkan Medium.** NASA-MODIS OR ≈ 8,2 (SK 95%: 2,8-23,9), NASA-NOAA20 OR ≈ 6,7 (2,5-17,7), siang hari OR ≈ 20,9 (5,5-80,4), dan Maluku-Papua OR ≈ 5,6 (3,0-10,6).
+
+**High dibandingkan Medium.**
+
+* NASA-MODIS OR ≈ **11,8** (6,8-20,7): MODIS menghasilkan lebih banyak *High* dibanding NOAA21.
+* NASA-NOAA20 OR ≈ **0,35** (0,24-0,50): NOAA20 cenderung menghasilkan *Low* tetapi **jarang** *High*, berlawanan dengan arah efeknya pada *Low*. Perbedaan arah ini hanya terlihat pada model multinomial.
+* Maluku-Papua OR ≈ 5,1 (2,4-11,0).
+* **Sesi siang** OR ≈ 3,0 dengan selang kepercayaan (0,75-12,0) yang mencakup 1 (p ≈ 0,12): setelah koreksi klaster, efek siang hari terhadap *High* **tidak signifikan**. Efek siang hari terutama terlihat pada kategori *Low*.
+
+Dua catatan metodologis: (1) akurasi klasifikasi model tidak dipakai sebagai ukuran karena model hampir selalu memprediksi *Medium* (akurasinya ≈ 89,3%, sama dengan menebak semua titik *Medium*); (2) NOAA20 pada malam hari tidak memiliki satu pun hotspot *Low* maupun *High* (642 titik seluruhnya *Medium*), yang mengisyaratkan interaksi satelit × sesi yang tidak dimodelkan di sini.
+
+## Analisis Sensitivitas: Tanpa Kabupaten Merauke
+
+Merauke menyumbang 1.030 titik (30,7%), dengan 184 hotspot *Low* (17,9% dari titik Merauke) dan 48 hotspot *High*. Dengan kata lain, **sekitar 69% seluruh hotspot *Low* berasal dari satu kabupaten**. Model biner diulang tanpa Merauke untuk menguji apakah temuan bergantung padanya.
+
+```{r sensitivitas}
+hot_s <- hot %>% filter(KabKota != "MERAUKE")
+c(n = nrow(hot_s), low = sum(hot_s$conf_rendah), persen_low = round(100 * mean(hot_s$conf_rendah), 1))
+
+m1s <- glm(conf_rendah ~ Satelit + Sesi + Pulau, data = hot_s, family = binomial)
+vcs <- vcovCL(m1s, cluster = hot_s$klaster)
+cis <- coefci(m1s, vcov. = vcs)
+hasil_s <- data.frame(OR = exp(coef(m1s)), SK_bawah = exp(cis[, 1]), SK_atas = exp(cis[, 2]),
+                      p_robust = coeftest(m1s, vcov. = vcs)[, 4])
+round(hasil_s, 4)
+round(as.numeric(auc(roc(hot_s$conf_rendah, fitted(m1s), quiet = TRUE))), 3)
+
+# perbandingan dengan model penuh
+perbandingan <- data.frame(Penuh = round(exp(coef(m1)), 2), Tanpa_Merauke = round(exp(coef(m1s)), 2))
+perbandingan
+```
+
+**Interpretasi.** Setelah Merauke dikeluarkan (n = 2.320; *Low* tinggal 84 titik atau 3,6%), diperoleh pola berikut (OR dengan SK 95% *cluster-robust*):
+
+| Prediktor | Model penuh | Tanpa Merauke | Kesimpulan |
+|---|---|---|---|
+| Siang (vs malam) | 19,6 | 7,5 (2,9-19,2) | **Tetap signifikan**, efeknya melemah |
+| NASA-MODIS (vs NOAA21) | 8,2 | 9,2 (3,1-28,0) | **Tetap signifikan dan stabil** |
+| NASA-NOAA20 (vs NOAA21) | 6,4 | 1,03 (0,50-2,12; p ≈ 0,93) | **Hilang** |
+| Maluku-Papua (vs Kalimantan) | 3,3 | 0,33 (0,12-0,89; p ≈ 0,029) | **Berbalik arah** |
+| Sulawesi (vs Kalimantan) | 0,38 | 0,20 (0,09-0,43) | Tetap signifikan |
+| Sumatera (vs Kalimantan) | 0,055 | 0,013 (0,002-0,10) | Tetap signifikan |
+
+Temuan yang **bertahan** adalah efek sesi siang hari dan satelit NASA-MODIS, serta posisi Sulawesi dan Sumatera yang lebih rendah dari Kalimantan. Sebaliknya, efek **NOAA20** dan **Maluku-Papua** pada model penuh sebagian besar **didorong oleh Merauke**: tanpa Merauke, NOAA20 tidak berbeda dari NOAA21 dan Maluku-Papua justru memiliki odds *Low* lebih rendah dari Kalimantan. Dengan demikian, kedua temuan itu tidak boleh dinyatakan sebagai karakteristik umum satelit atau wilayah. Mengapa hotspot di Merauke begitu sering berkategori *Low* tidak dapat dijelaskan dari data ini dan perlu ditelusuri lebih lanjut (misalnya melalui jenis tutupan lahan atau pola pembakaran lokal), bukan diasumsikan. Hasil chi-square Pulau × *Confidence* pada bagian 4.3 mengandung kerentanan yang sama.
+
+## Pembahasan Umum
+
+Secara keseluruhan, tingkat kepercayaan hotspot **berhubungan dengan karakteristik deteksinya**, yaitu sesi waktu dan jenis satelit, dengan kekuatan sedang-lemah menurut uji asosiasi. Temuan paling kokoh adalah bahwa hotspot yang terdeteksi pada siang hari jauh lebih sering berkategori *Low* dibanding malam hari, dan bahwa NASA-MODIS cenderung menghasilkan kategori *High* maupun *Low* lebih banyak dibanding NOAA21. Penjelasan mengapa siang hari berkepercayaan lebih rendah belum dapat dibuktikan dari data ini; dugaan seperti adanya sumber panas non-api atau pantulan cahaya matahari memerlukan rujukan dokumentasi sensor, bukan kesimpulan statistik. Perbedaan satelit juga sebagian mencerminkan perbedaan algoritma *confidence* masing-masing sensor.
+
+# Kesimpulan dan Saran
+
+## Kesimpulan
+
+1. *Confidence* hotspot berhubungan nyata dengan satelit (V ≈ 0,22), sesi waktu (V ≈ 0,25), dan pulau (V ≈ 0,16), dengan kekuatan sedang-lemah.
+2. Pada regresi logistik biner (AUC ≈ 0,87), deteksi siang hari meningkatkan odds hotspot *Low* sekitar 19,6 kali (7,5 kali tanpa Merauke) dan NASA-MODIS sekitar 8 kali dibanding NOAA21; keduanya bertahan setelah koreksi klaster dan analisis sensitivitas.
+3. Pada regresi logistik multinomial, NASA-MODIS meningkatkan odds *Low* maupun *High* dibanding *Medium*, sedangkan NOAA20 meningkatkan *Low* tetapi menurunkan *High*. Efek siang hari terhadap *High* tidak signifikan setelah koreksi klaster.
+4. Efek NOAA20 dan Maluku-Papua pada model penuh didorong oleh Kabupaten Merauke dan tidak bertahan tanpa kabupaten tersebut.
+
+## Saran
+
+1. Pengguna data hotspot sebaiknya mempertimbangkan jenis satelit dan waktu deteksi ketika menafsirkan *confidence*, bukan memperlakukan kategori yang sama setara antarsensor.
+2. Hotspot di Kabupaten Merauke dengan *confidence* rendah perlu ditelaah tersendiri (misalnya melalui verifikasi lapangan atau data tutupan lahan) karena memengaruhi gambaran nasional.
+3. Penelitian lanjutan sebaiknya memakai periode pengamatan yang lebih panjang (musim kemarau sepanjang tahun) dan memodelkan interaksi satelit × sesi.
+
+## Keterbatasan
+
+* Data hanya mencakup dua hari, sehingga hasil menggambarkan karakteristik deteksi pada periode tersebut, bukan pola sepanjang tahun.
+* *Confidence* adalah keluaran algoritma yang berbeda tiap satelit; hasil menggambarkan karakteristik deteksi, bukan keandalan kejadian karhutla.
+* Titik hotspot yang berdekatan tidak independen. Koreksi klaster per kabupaten/kota telah dipakai pada regresi, tetapi tidak pada uji chi-square.
+* Satu kabupaten (Merauke) menyumbang 30,7% titik dan sekitar 69% hotspot *Low*, sehingga sebagian temuan tidak stabil.
+* Kategori yang jarang (hotspot *High* hanya 90 titik; Jawa dan Sumatera masing-masing hanya 1 titik *Low*) membuat estimasi untuk kelompok tersebut kurang stabil.
+* Seluruh hasil bersifat asosiasi dan tidak menunjukkan hubungan sebab-akibat.
+
+# Daftar Pustaka
+
+Agresti, A. (2013). *Categorical Data Analysis* (3rd ed.). Wiley.
+
+Cameron, A. C., & Miller, D. L. (2015). A practitioner's guide to cluster-robust inference. *Journal of Human Resources, 50*(2), 317-372.
+
+Hosmer, D. W., Lemeshow, S., & Sturdivant, R. X. (2013). *Applied Logistic Regression* (3rd ed.). Wiley.
+
+Zeileis, A., Köll, S., & Graham, N. (2020). Various versatile variances: An object-oriented implementation of clustered covariances in R. *Journal of Statistical Software, 95*(1), 1-36.
+
+*(Tambahkan: dokumentasi NASA FIRMS tentang definisi hotspot dan *confidence*, serta sumber data hotspot yang kamu pakai.)*
+
+```{r sesi-info}
+sessionInfo()
+```
