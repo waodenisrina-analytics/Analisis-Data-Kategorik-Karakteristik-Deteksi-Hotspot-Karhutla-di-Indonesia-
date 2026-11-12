@@ -7,6 +7,7 @@ Low/Medium/High).
 ## Data 📃
 Sheet *Detail* pada `[DATA] sebaran-hotspot.xlsx`: 3.350 titik hotspot, 33 provinsi,
 184 kabupaten/kota, periode 11-12 November 2026.
+
 Sumber : https://sipongi.gakkum.kehutanan.go.id/sebaran-titik-panas
 
 ## Metode 📊
