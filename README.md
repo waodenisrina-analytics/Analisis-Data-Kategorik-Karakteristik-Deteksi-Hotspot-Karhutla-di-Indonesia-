@@ -5,8 +5,9 @@ Analisis karakteristik deteksi hotspot karhutla berdasarkan satelit, sesi waktu
 Low/Medium/High).
 
 ## Data 📃
-Sheet *Detail* pada `sebaran-hotspot.xlsx`: 3.350 titik hotspot, 33 provinsi,
+Sheet *Detail* pada `[DATA] sebaran-hotspot.xlsx`: 3.350 titik hotspot, 33 provinsi,
 184 kabupaten/kota, periode 11-12 November 2026.
+Sumber : https://sipongi.gakkum.kehutanan.go.id/sebaran-titik-panas
 
 ## Metode 📊
 - Uji chi-square independensi (Cramér's V, residual terstandarisasi)
